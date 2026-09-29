@@ -5,28 +5,73 @@ import {
   Trash2,
   ArrowUp,
   ArrowDown,
-  Layers,
   Sparkles,
   Download,
   Upload,
   Settings,
-  ShieldCheck,
-  Volume2,
-  Zap,
-  Info,
   ChevronDown,
   ChevronUp,
   FlaskConical,
   Clock,
   User,
+  FileSpreadsheet,
+  FileDown,
+  HelpCircle,
+  CheckCircle,
 } from 'lucide-react';
-import { DEFAULT_PLANNED_COURSES } from '../data/sampleCourses';
+import { DEFAULT_PLANNED_COURSES, BRACU_COURSE_CATALOG, lookupCourseInfo } from '../data/sampleCourses';
 
 interface CoursePlannerProps {
   courses: CoursePlan[];
   onUpdateCourses: (courses: CoursePlan[]) => void;
   settings: BotSettings;
   onUpdateSettings: (settings: Partial<BotSettings>) => void;
+}
+
+// RFC 4180 compliant CSV parser
+function parseCSV(text: string): string[][] {
+  const lines: string[][] = [];
+  let row: string[] = [];
+  let currentVal = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    const nextChar = text[i + 1];
+
+    if (char === '"') {
+      if (inQuotes && nextChar === '"') {
+        currentVal += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (char === ',' && !inQuotes) {
+      row.push(currentVal.trim());
+      currentVal = '';
+    } else if ((char === '\r' || char === '\n') && !inQuotes) {
+      if (char === '\r' && nextChar === '\n') {
+        i++;
+      }
+      row.push(currentVal.trim());
+      if (row.some((cell) => cell.length > 0)) {
+        lines.push(row);
+      }
+      row = [];
+      currentVal = '';
+    } else {
+      currentVal += char;
+    }
+  }
+
+  if (currentVal.length > 0 || row.length > 0) {
+    row.push(currentVal.trim());
+    if (row.some((cell) => cell.length > 0)) {
+      lines.push(row);
+    }
+  }
+
+  return lines;
 }
 
 export const CoursePlanner: React.FC<CoursePlannerProps> = ({
@@ -37,6 +82,8 @@ export const CoursePlanner: React.FC<CoursePlannerProps> = ({
 }) => {
   const [expandedCourseId, setExpandedCourseId] = useState<string | null>(courses[0]?.id || null);
   const [showSettingsDrawer, setShowSettingsDrawer] = useState<boolean>(false);
+  const [csvNotice, setCsvNotice] = useState<string | null>(null);
+  const [quickCatalogCode, setQuickCatalogCode] = useState<string>('');
 
   // Add new course (supports 4 to 6+ courses)
   const handleAddCourse = () => {
@@ -55,7 +102,7 @@ export const CoursePlanner: React.FC<CoursePlannerProps> = ({
           id: 'c-' + Date.now() + '-1',
           priority: 1,
           sectionNumber: '01',
-          faculty: 'TBA',
+          faculty: 'ANK',
           timeSlot: 'Sun/Tue 08:00 AM - 09:20 AM',
           labSectionNumber: '01',
           minSeatsRequired: 1,
@@ -65,7 +112,7 @@ export const CoursePlanner: React.FC<CoursePlannerProps> = ({
           id: 'c-' + Date.now() + '-2',
           priority: 2,
           sectionNumber: '02',
-          faculty: 'TBA',
+          faculty: 'DSR',
           timeSlot: 'Mon/Wed 09:30 AM - 10:50 AM',
           labSectionNumber: '02',
           minSeatsRequired: 1,
@@ -75,6 +122,47 @@ export const CoursePlanner: React.FC<CoursePlannerProps> = ({
     };
     onUpdateCourses([...courses, newCourse]);
     setExpandedCourseId(newId);
+  };
+
+  const handleAddFromCatalog = (code: string) => {
+    if (!code) return;
+    const info = lookupCourseInfo(code);
+    const newId = 'plan-' + Date.now();
+    const newCourse: CoursePlan = {
+      id: newId,
+      courseCode: info.code,
+      courseName: info.name,
+      credits: info.credits,
+      hasLab: info.hasLab,
+      labCode: info.labCode,
+      labCredits: info.labCredits,
+      status: 'idle',
+      choices: [
+        {
+          id: 'c-' + Date.now() + '-1',
+          priority: 1,
+          sectionNumber: '01',
+          faculty: 'TBA',
+          timeSlot: 'Sun/Tue 08:00 AM - 09:20 AM',
+          labSectionNumber: info.hasLab ? '01' : undefined,
+          minSeatsRequired: 1,
+          note: '1st Preference',
+        },
+        {
+          id: 'c-' + Date.now() + '-2',
+          priority: 2,
+          sectionNumber: '02',
+          faculty: 'TBA',
+          timeSlot: 'Mon/Wed 09:30 AM - 10:50 AM',
+          labSectionNumber: info.hasLab ? '02' : undefined,
+          minSeatsRequired: 1,
+          note: '2nd Choice Fallback',
+        },
+      ],
+    };
+    onUpdateCourses([...courses, newCourse]);
+    setExpandedCourseId(newId);
+    setQuickCatalogCode('');
   };
 
   const handleDeleteCourse = (id: string) => {
@@ -148,7 +236,6 @@ export const CoursePlanner: React.FC<CoursePlannerProps> = ({
     list[index] = list[targetIndex];
     list[targetIndex] = temp;
 
-    // Re-index priorities
     const reindexed = list.map((ch, idx) => ({ ...ch, priority: idx + 1 }));
     handleUpdateCourse(courseId, { choices: reindexed });
   };
@@ -172,17 +259,323 @@ export const CoursePlanner: React.FC<CoursePlannerProps> = ({
     handleUpdateCourse(courseId, { choices: updated });
   };
 
-  // Helper for priority suffix
   const getPriorityOrdinal = (n: number) => {
     const suffixes = ['th', 'st', 'nd', 'rd'];
     const v = n % 100;
     return n + (suffixes[(v - 20) % 10] || suffixes[v] || suffixes[0]);
   };
 
-  // Export & Import
+  // CSV EXPORT IMPLEMENTATION
+  const handleExportCSV = () => {
+    const headers = [
+      'Course Code',
+      'Course Title',
+      'Credits',
+      'Has Lab',
+      'Priority',
+      'Section',
+      'Faculty',
+      'Time Slot',
+      'Room',
+      'Lab Section',
+      'Min Seats',
+      'Notes',
+    ];
+
+    const rows: string[] = [headers.join(',')];
+
+    courses.forEach((course) => {
+      course.choices.forEach((choice) => {
+        const row = [
+          course.courseCode,
+          `"${(course.courseName || '').replace(/"/g, '""')}"`,
+          course.credits,
+          course.hasLab ? 'Yes' : 'No',
+          choice.priority,
+          `"${choice.sectionNumber.padStart(2, '0')}"`,
+          `"${choice.faculty || 'TBA'}"`,
+          `"${(choice.timeSlot || '').replace(/"/g, '""')}"`,
+          `"${choice.room || ''}"`,
+          `"${choice.labSectionNumber || ''}"`,
+          choice.minSeatsRequired || 1,
+          `"${(choice.note || '').replace(/"/g, '""')}"`,
+        ];
+        rows.push(row.join(','));
+      });
+    });
+
+    const csvContent = rows.join('\r\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `bracu-advising-priority-list-${settings.targetPhase}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+
+    setCsvNotice(`Priority list exported successfully as CSV! (${courses.length} courses)`);
+    setTimeout(() => setCsvNotice(null), 4500);
+  };
+
+  // CSV IMPORT IMPLEMENTATION
+  const handleImportCSV = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const text = event.target?.result as string;
+        if (!text || !text.trim()) {
+          alert('CSV file is empty.');
+          return;
+        }
+
+        const lines = parseCSV(text);
+        if (lines.length === 0) {
+          alert('Could not find any readable rows in the CSV file.');
+          return;
+        }
+
+        // Determine column indexes from header or first row
+        const firstRow = lines[0].map((h) => h.toLowerCase().trim().replace(/['"]/g, ''));
+        let hasHeader = true;
+
+        let colCourseCode = firstRow.findIndex(
+          (h) => h === 'course code' || h === 'course' || h === 'coursecode' || h === 'code'
+        );
+        let colSection = firstRow.findIndex(
+          (h) => h === 'section' || h === 'section number' || h === 'sec' || h === 'section_number'
+        );
+        let colPriority = firstRow.findIndex(
+          (h) => h === 'priority' || h === 'rank' || h === 'choice' || h === 'choice_number'
+        );
+        let colFaculty = firstRow.findIndex(
+          (h) => h === 'faculty' || h === 'instructor' || h === 'teacher'
+        );
+        let colTimeSlot = firstRow.findIndex(
+          (h) => h === 'time slot' || h === 'timeslot' || h === 'time' || h === 'slot'
+        );
+        let colRoom = firstRow.findIndex((h) => h === 'room' || h === 'classroom');
+        let colLabSec = firstRow.findIndex(
+          (h) => h === 'lab section' || h === 'lab sec' || h === 'lab_section'
+        );
+        let colTitle = firstRow.findIndex(
+          (h) => h === 'course title' || h === 'title' || h === 'course name' || h === 'name'
+        );
+        let colCredits = firstRow.findIndex(
+          (h) => h === 'credits' || h === 'credit'
+        );
+        let colHasLab = firstRow.findIndex(
+          (h) => h === 'has lab' || h === 'haslab' || h === 'lab'
+        );
+        let colMinSeats = firstRow.findIndex(
+          (h) => h === 'min seats' || h === 'min_seats' || h === 'minseats'
+        );
+        let colNotes = firstRow.findIndex(
+          (h) => h === 'notes' || h === 'note' || h === 'comment'
+        );
+
+        // If no header matches, check if row 0 is already data (e.g. "CSE230,05")
+        if (colCourseCode === -1 || colSection === -1) {
+          const sample0 = lines[0][0]?.toUpperCase().replace(/[^A-Z0-9]/g, '') || '';
+          const sample1 = lines[0][1]?.replace(/[^0-9]/g, '') || '';
+          const isRow0Data = /^[A-Z]{3}\d{3}/.test(sample0) && sample1.length > 0;
+
+          if (isRow0Data) {
+            hasHeader = false;
+            colCourseCode = 0;
+            colSection = 1;
+            colFaculty = lines[0][2] ? 2 : -1;
+            colTimeSlot = lines[0][3] ? 3 : -1;
+          } else {
+            alert(
+              "CSV must contain at least 'Course Code' and 'Section' columns.\nExample header: Course Code,Section"
+            );
+            return;
+          }
+        }
+
+        const dataRows = hasHeader ? lines.slice(1) : lines;
+        if (dataRows.length === 0) {
+          alert('No course records found in CSV.');
+          return;
+        }
+
+        // Group rows by Course Code to construct fallback priority chains
+        interface CsvItem {
+          courseCode: string;
+          section: string;
+          priority?: number;
+          faculty?: string;
+          timeSlot?: string;
+          room?: string;
+          labSection?: string;
+          title?: string;
+          credits?: number;
+          hasLab?: boolean;
+          minSeats?: number;
+          notes?: string;
+        }
+
+        const parsedItems: CsvItem[] = [];
+
+        for (const row of dataRows) {
+          const rawCode = row[colCourseCode]?.trim().toUpperCase().replace(/\s+/g, '');
+          const rawSec = row[colSection]?.trim().replace(/^0+/, '');
+
+          if (!rawCode) continue;
+
+          // Normalize section e.g. "5" -> "05", "13" -> "13"
+          const sec = (rawSec || '01').padStart(2, '0');
+          const prio = colPriority !== -1 && row[colPriority] ? parseInt(row[colPriority], 10) : undefined;
+          const fac = colFaculty !== -1 ? row[colFaculty]?.trim().toUpperCase() : undefined;
+          const slot = colTimeSlot !== -1 ? row[colTimeSlot]?.trim() : undefined;
+          const room = colRoom !== -1 ? row[colRoom]?.trim() : undefined;
+          const labSec = colLabSec !== -1 ? row[colLabSec]?.trim() : undefined;
+          const title = colTitle !== -1 ? row[colTitle]?.trim() : undefined;
+          const cred = colCredits !== -1 && row[colCredits] ? parseInt(row[colCredits], 10) : undefined;
+          const labBool =
+            colHasLab !== -1 && row[colHasLab]
+              ? row[colHasLab].toLowerCase().startsWith('y') || row[colHasLab].toLowerCase() === 'true'
+              : undefined;
+          const seats = colMinSeats !== -1 && row[colMinSeats] ? parseInt(row[colMinSeats], 10) : 1;
+          const notes = colNotes !== -1 ? row[colNotes]?.trim() : undefined;
+
+          parsedItems.push({
+            courseCode: rawCode,
+            section: sec,
+            priority: isNaN(prio as number) ? undefined : prio,
+            faculty: fac || 'TBA',
+            timeSlot: slot || 'Sun/Tue 08:00 AM - 09:20 AM',
+            room: room || '',
+            labSection: labSec,
+            title,
+            credits: isNaN(cred as number) ? undefined : cred,
+            hasLab: labBool,
+            minSeats: isNaN(seats) ? 1 : seats,
+            notes,
+          });
+        }
+
+        if (parsedItems.length === 0) {
+          alert('Could not parse any valid course rows from the CSV file.');
+          return;
+        }
+
+        // Group by course code
+        const courseMap = new Map<string, CsvItem[]>();
+        parsedItems.forEach((item) => {
+          if (!courseMap.has(item.courseCode)) {
+            courseMap.set(item.courseCode, []);
+          }
+          courseMap.get(item.courseCode)!.push(item);
+        });
+
+        const newCourses: CoursePlan[] = [];
+
+        courseMap.forEach((items, code) => {
+          // Look up metadata from real BRACU course catalog
+          const catalogInfo = lookupCourseInfo(code);
+
+          // Sort items by explicit priority if given, otherwise order of appearance in CSV
+          items.sort((a, b) => {
+            if (a.priority !== undefined && b.priority !== undefined) {
+              return a.priority - b.priority;
+            }
+            return 0;
+          });
+
+          const choices: SectionChoice[] = items.map((item, idx) => {
+            const priorityNum = item.priority || idx + 1;
+            return {
+              id: `choice-${Date.now()}-${code}-${idx}`,
+              priority: priorityNum,
+              sectionNumber: item.section,
+              faculty: item.faculty || 'TBA',
+              timeSlot: item.timeSlot || 'Sun/Tue 08:00 AM - 09:20 AM',
+              room: item.room || '',
+              labSectionNumber: item.labSection || (catalogInfo.hasLab ? item.section : undefined),
+              minSeatsRequired: item.minSeats || 1,
+              note:
+                item.notes ||
+                (priorityNum === 1
+                  ? 'Primary preferred section'
+                  : `${getPriorityOrdinal(priorityNum)} Choice Fallback`),
+            };
+          });
+
+          // Ensure unique priorities 1..N
+          choices.forEach((ch, idx) => {
+            ch.priority = idx + 1;
+          });
+
+          const customTitle = items[0].title;
+          const customCredits = items[0].credits;
+          const customHasLab = items[0].hasLab;
+
+          newCourses.push({
+            id: `plan-${code.toLowerCase()}-${Date.now()}`,
+            courseCode: code,
+            courseName: customTitle || catalogInfo.name,
+            credits: customCredits !== undefined ? customCredits : catalogInfo.credits,
+            hasLab: customHasLab !== undefined ? customHasLab : catalogInfo.hasLab,
+            labCode: catalogInfo.labCode,
+            labCredits: catalogInfo.labCredits,
+            status: 'idle',
+            choices,
+          });
+        });
+
+        onUpdateCourses(newCourses);
+        if (newCourses.length > 0) {
+          setExpandedCourseId(newCourses[0].id);
+        }
+
+        const totalChoices = newCourses.reduce((sum, c) => sum + c.choices.length, 0);
+        setCsvNotice(
+          `Successfully imported ${newCourses.length} courses with ${totalChoices} priority choices from CSV!`
+        );
+        setTimeout(() => setCsvNotice(null), 5000);
+      } catch (err: unknown) {
+        console.error('Error importing CSV:', err);
+        alert('Failed to parse CSV file. Please verify the format and try again.');
+      }
+    };
+
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  const handleDownloadSampleCSV = () => {
+    const sample = [
+      'Course Code,Section,Priority,Faculty,Time Slot,Room,Lab Section,Min Seats,Notes',
+      'CSE230,05,1,AVB,Sun/Tue 11:00 AM - 12:20 PM,09A-04C,,1,Primary Choice',
+      'CSE230,08,2,TBA,Sun/Tue 03:30 PM - 04:50 PM,12A-09C,,1,2nd Fallback Choice',
+      'CSE230,10,3,YND,Thu/Sat 03:30 PM - 04:50 PM,08C-12A,,1,3rd Fallback Choice',
+      'CSE220,01,1,SKS,Sun/Tue 08:00 AM - 09:20 AM,UB2-02C,01,1,1st Choice with Lab Sec 01',
+      'CSE220,02,2,AHR,Mon/Wed 09:30 AM - 10:50 AM,UB2-03D,02,1,2nd Choice with Lab Sec 02',
+      'MAT215,01,1,KBA,Sun/Tue 09:30 AM - 10:50 AM,09H-12C,,1,1st Choice',
+      'MAT215,02,2,KBA,Mon/Wed 11:00 AM - 12:20 PM,09H-12C,,1,2nd Choice Fallback',
+      'PHY112,01,1,MSR,Sun/Tue 12:30 PM - 01:50 PM,UB3-01A,01,1,1st Choice',
+      'PHY112,02,2,AFA,Mon/Wed 02:00 PM - 03:20 PM,UB3-02B,02,1,2nd Choice',
+      'ENG102,04,1,SHN,Thu/Sat 08:00 AM - 09:20 AM,UB1-08A,,1,1st Choice',
+      'ENG102,07,2,NZM,Mon/Wed 03:30 PM - 04:50 PM,UB1-09B,,1,2nd Choice Fallback',
+    ].join('\r\n');
+
+    const blob = new Blob([sample], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'sample-bracu-priority-list.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // JSON Export & Import
   const handleExportJSON = () => {
     const data = {
-      version: '2.4.0',
+      version: '2.5.0',
       exportedAt: new Date().toISOString(),
       settings,
       courses,
@@ -208,11 +601,12 @@ export const CoursePlanner: React.FC<CoursePlannerProps> = ({
           if (parsed.settings) {
             onUpdateSettings(parsed.settings);
           }
-          alert('Routine successfully loaded from JSON configuration!');
+          setCsvNotice('Routine successfully loaded from JSON configuration!');
+          setTimeout(() => setCsvNotice(null), 4000);
         } else {
           alert('Invalid JSON file format.');
         }
-      } catch (err) {
+      } catch {
         alert('Could not parse JSON file.');
       }
     };
@@ -222,6 +616,22 @@ export const CoursePlanner: React.FC<CoursePlannerProps> = ({
 
   return (
     <div className="space-y-6">
+      {/* Toast Notice Banner */}
+      {csvNotice && (
+        <div className="bg-emerald-950/80 border border-emerald-500/50 text-emerald-200 px-4 py-3 rounded-xl flex items-center justify-between shadow-lg animate-fadeIn">
+          <div className="flex items-center gap-2 text-xs font-semibold">
+            <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span>{csvNotice}</span>
+          </div>
+          <button
+            onClick={() => setCsvNotice(null)}
+            className="text-xs text-emerald-400 hover:text-white ml-3"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* Overview Banner & Quick Actions */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-sm">
         <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
@@ -238,14 +648,36 @@ export const CoursePlanner: React.FC<CoursePlannerProps> = ({
               Course &amp; Section Priority Queue
             </h2>
             <p className="text-xs text-slate-400 mt-1 max-w-2xl">
-              যদি ১ম চয়েসে সীট ০ (0) দেখায়, রোবট স্বয়ংক্রিয়ভাবে ২য়, ৩য়, ৪র্থ বা পরবর্তী যেকোনো চয়েসে বুক করার চেষ্টা করবে। কোনো চয়েসের লিমিট নেই—যত ইচ্ছা ব্যাকআপ চয়েস যুক্ত করতে পারবেন।
+              যদি ১ম চয়েসে সীট ০ (0) দেখায়, রোবট স্বয়ংক্রিয়ভাবে ২য়, ৩য়, ৪র্থ বা পরবর্তী যেকোনো চয়েসে বুক করার চেষ্টা করবে। কোনো চয়েসের লিমিট নেই—CSV ফাইল থেকে ইমপোর্ট বা এক্সপোর্ট করতে পারেন।
             </p>
           </div>
 
-          {/* Action Tools */}
+          {/* Action Tools: CSV Import/Export, JSON, Settings */}
           <div className="flex flex-wrap items-center gap-2">
+            {/* CSV Import */}
+            <label className="px-3 py-2 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 text-xs font-semibold rounded-xl border border-emerald-500/40 transition-all flex items-center gap-1.5 cursor-pointer shadow-xs">
+              <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Import CSV</span>
+              <input type="file" accept=".csv,text/csv" onChange={handleImportCSV} className="hidden" />
+            </label>
+
+            {/* CSV Export */}
             <button
-              onClick={() => onUpdateCourses(DEFAULT_PLANNED_COURSES)}
+              onClick={handleExportCSV}
+              className="px-3 py-2 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 text-xs font-semibold rounded-xl border border-emerald-500/40 transition-all flex items-center gap-1.5 shadow-xs"
+              title="Download current priority list as structured CSV"
+            >
+              <FileDown className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Export as CSV</span>
+            </button>
+
+            {/* Load Default Preset */}
+            <button
+              onClick={() => {
+                onUpdateCourses(DEFAULT_PLANNED_COURSES);
+                setCsvNotice('Loaded standard BRACU CSE advising routine preset.');
+                setTimeout(() => setCsvNotice(null), 3000);
+              }}
               className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-xl border border-slate-700 transition-all flex items-center gap-1.5"
               title="Reset to CSE Typical Routine"
             >
@@ -253,27 +685,67 @@ export const CoursePlanner: React.FC<CoursePlannerProps> = ({
               <span>Load Preset</span>
             </button>
 
+            {/* Export JSON */}
             <button
               onClick={handleExportJSON}
               className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-xl border border-slate-700 transition-all flex items-center gap-1.5"
+              title="Export complete config with settings as JSON"
             >
               <Download className="w-3.5 h-3.5 text-blue-400" />
-              <span>Export Config</span>
+              <span>Export JSON</span>
             </button>
 
+            {/* Import JSON */}
             <label className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-xl border border-slate-700 transition-all flex items-center gap-1.5 cursor-pointer">
-              <Upload className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Import Config</span>
+              <Upload className="w-3.5 h-3.5 text-blue-400" />
+              <span>Import JSON</span>
               <input type="file" accept=".json" onChange={handleImportJSON} className="hidden" />
             </label>
 
+            {/* Engine Settings */}
             <button
               onClick={() => setShowSettingsDrawer(!showSettingsDrawer)}
               className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-xl border border-slate-700 transition-all flex items-center gap-1.5"
             >
               <Settings className="w-3.5 h-3.5 text-indigo-400" />
-              <span>Bot Engine Settings</span>
+              <span>Bot Settings</span>
             </button>
+          </div>
+        </div>
+
+        {/* Quick Helper Bar for CSV Specs & Quick Add from Catalog */}
+        <div className="mt-4 pt-3 border-t border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-400">
+          <div className="flex items-center gap-2">
+            <span className="font-semibold text-slate-300">Quick Add Course:</span>
+            <select
+              value={quickCatalogCode}
+              onChange={(e) => {
+                setQuickCatalogCode(e.target.value);
+                handleAddFromCatalog(e.target.value);
+              }}
+              className="bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-white focus:border-blue-500 outline-none"
+            >
+              <option value="">Select from BRACU Catalog...</option>
+              {Object.values(BRACU_COURSE_CATALOG).map((cat) => (
+                <option key={cat.code} value={cat.code}>
+                  {cat.code} - {cat.name} ({cat.credits} cr{cat.hasLab ? ' + Lab' : ''})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleDownloadSampleCSV}
+              className="text-emerald-400 hover:text-emerald-300 underline flex items-center gap-1 text-[11px]"
+            >
+              <HelpCircle className="w-3.5 h-3.5" />
+              <span>Download Sample CSV Template</span>
+            </button>
+            <span className="text-slate-600">|</span>
+            <span className="text-[11px] text-slate-400">
+              CSV Format: <code className="text-emerald-300 font-mono">Course Code, Section</code>
+            </span>
           </div>
         </div>
 
@@ -473,11 +945,17 @@ export const CoursePlanner: React.FC<CoursePlannerProps> = ({
                       <input
                         type="text"
                         value={course.courseCode}
-                        onChange={(e) =>
+                        onChange={(e) => {
+                          const val = e.target.value.toUpperCase().trim();
+                          const info = lookupCourseInfo(val);
                           handleUpdateCourse(course.id, {
-                            courseCode: e.target.value.toUpperCase().trim(),
-                          })
-                        }
+                            courseCode: val,
+                            courseName: course.courseName === 'Operating Systems' || !course.courseName ? info.name : course.courseName,
+                            hasLab: info.hasLab,
+                            labCode: info.labCode,
+                            labCredits: info.labCredits,
+                          });
+                        }}
                         className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white font-mono uppercase focus:border-blue-500 outline-none"
                         placeholder="e.g. CSE230"
                       />

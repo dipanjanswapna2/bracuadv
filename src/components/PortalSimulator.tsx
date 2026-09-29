@@ -10,6 +10,8 @@ import {
   INITIAL_STUDENT_INFO,
   MOCK_AVAILABLE_PORTAL_ROWS,
   INITIAL_SELECTED_SECTIONS,
+  lookupCourseInfo,
+  BRACU_COURSE_CATALOG,
 } from '../data/sampleCourses';
 import { soundNotifier } from '../utils/audioAlert';
 import confetti from 'canvas-confetti';
@@ -31,6 +33,11 @@ import {
   Sliders,
   Sparkles,
   Terminal,
+  Activity,
+  Radio,
+  Clock,
+  Building,
+  Filter,
 } from 'lucide-react';
 
 interface PortalSimulatorProps {
@@ -53,6 +60,12 @@ export const PortalSimulator: React.FC<PortalSimulatorProps> = ({
   onOpenDownloadModal,
 }) => {
   const [quickFilter, setQuickFilter] = useState('');
+  const [departmentFilter, setDepartmentFilter] = useState<string>('ALL');
+  const [hideFullSections, setHideFullSections] = useState<boolean>(false);
+  const [isLiveSyncActive, setIsLiveSyncActive] = useState<boolean>(true);
+  const [livePing, setLivePing] = useState<number>(24);
+  const [lastLiveEvent, setLastLiveEvent] = useState<string>('Live connection active to connect.bracu.ac.bd');
+
   const [availableRows, setAvailableRows] = useState<PortalRow[]>(MOCK_AVAILABLE_PORTAL_ROWS);
   const [selectedSections, setSelectedSections] = useState<SelectedSection[]>(INITIAL_SELECTED_SECTIONS);
   const [logs, setLogs] = useState<BotLog[]>([]);
@@ -60,6 +73,7 @@ export const PortalSimulator: React.FC<PortalSimulatorProps> = ({
   const [activeCourseDetailsModal, setActiveCourseDetailsModal] = useState<PortalRow | null>(null);
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [confirmedAdvisingState, setConfirmedAdvisingState] = useState(false);
+  const [showActionsDropdown, setShowActionsDropdown] = useState(false);
 
   // Calculate credits taken
   const creditTaken = selectedSections.reduce((sum, item) => sum + item.credits, 0);
@@ -67,7 +81,7 @@ export const PortalSimulator: React.FC<PortalSimulatorProps> = ({
   // Helper log function
   const addLog = (type: BotLog['type'], message: string, courseCode?: string, choicePriority?: number) => {
     const newLog: BotLog = {
-      id: 'log-' + Date.now() + '-' + Math.random().toString(36).substr(2, 4),
+      id: 'log-' + Date.now() + '-' + Math.random().toString(36).substring(2, 6),
       timestamp: new Date().toLocaleTimeString(),
       type,
       message,
@@ -76,6 +90,46 @@ export const PortalSimulator: React.FC<PortalSimulatorProps> = ({
     };
     setLogs((prev) => [newLog, ...prev.slice(0, 49)]);
   };
+
+  // Live Server Activity Simulation (emulates real students reserving/dropping seats on BRACU Connect portal)
+  useEffect(() => {
+    if (!isLiveSyncActive) return;
+
+    const interval = setInterval(() => {
+      // Simulate small ping fluctuation (18ms - 42ms)
+      setLivePing(Math.floor(18 + Math.random() * 24));
+
+      // Occasional random real-time portal seat change
+      if (Math.random() > 0.45) {
+        setAvailableRows((prev) => {
+          const eligibleIdx = Math.floor(Math.random() * prev.length);
+          const target = prev[eligibleIdx];
+          if (!target) return prev;
+
+          // Realistic change: either +1 (drop) or -1 (book)
+          const delta = Math.random() > 0.5 ? 1 : -1;
+          const newSeats = Math.max(0, Math.min(10, target.availableSeats + delta));
+
+          if (newSeats !== target.availableSeats) {
+            const eventMsg =
+              delta > 0
+                ? `⚡ [LIVE SLMS] Seat released: ${target.courseCode} Sec ${target.sectionNumber} (+1 seat available)`
+                : `⚡ [LIVE SLMS] Student enrolled: ${target.courseCode} Sec ${target.sectionNumber} (-1 seat)`;
+            setLastLiveEvent(eventMsg);
+            if (botRunning) {
+              addLog('info', eventMsg, target.courseCode);
+            }
+          }
+
+          return prev.map((r, i) =>
+            i === eligibleIdx ? { ...r, availableSeats: newSeats } : r
+          );
+        });
+      }
+    }, 4500);
+
+    return () => clearInterval(interval);
+  }, [isLiveSyncActive, botRunning]);
 
   // Bot Auto Runner Loop
   useEffect(() => {
@@ -102,14 +156,14 @@ export const PortalSimulator: React.FC<PortalSimulatorProps> = ({
         return;
       }
 
-      // Pick the first pending course
+      // Pick the first pending course in queue
       const currentTarget = pendingCourses[0];
       addLog('info', `Scanning portal for ${currentTarget.courseCode}...`, currentTarget.courseCode);
 
-      // Auto type in quick filter to emulate typing
+      // Auto type in quick filter to emulate student typing
       setQuickFilter(currentTarget.courseCode.toLowerCase());
 
-      // Give a tiny simulated delay for table filtering
+      // Realistic scanning delay
       await new Promise((r) => setTimeout(r, 220));
 
       // Filter available rows for this course
@@ -117,7 +171,7 @@ export const PortalSimulator: React.FC<PortalSimulatorProps> = ({
         (r) => r.courseCode.toUpperCase() === currentTarget.courseCode.toUpperCase()
       );
 
-      // Iterate through user's prioritized choices (1st to 6th choice)
+      // Iterate through user's prioritized choices (1st, 2nd, 3rd... unlimited fallback)
       let secured = false;
       const sortedChoices = [...currentTarget.choices].sort((a, b) => a.priority - b.priority);
 
@@ -133,19 +187,22 @@ export const PortalSimulator: React.FC<PortalSimulatorProps> = ({
         const targetRow = matchingRows.find(
           (r) =>
             r.sectionNumber.padStart(2, '0') === targetSec &&
-            (!choice.faculty || choice.faculty === 'ANY' || r.faculty.toUpperCase() === choice.faculty.toUpperCase())
+            (!choice.faculty ||
+              choice.faculty === 'ANY' ||
+              choice.faculty === 'TBA' ||
+              r.faculty.toUpperCase() === choice.faculty.toUpperCase())
         );
 
         if (!targetRow) {
           addLog(
             'warning',
-            `Section ${targetSec} (${choice.faculty}) not found in available list. Moving to next choice.`,
+            `Section ${targetSec} (${choice.faculty}) not found in live portal table. Trying next choice.`,
             currentTarget.courseCode
           );
           continue;
         }
 
-        // Check seat availability!
+        // Check seat availability
         if (targetRow.availableSeats <= 0) {
           addLog(
             'warning',
@@ -165,10 +222,10 @@ export const PortalSimulator: React.FC<PortalSimulatorProps> = ({
           choice.priority
         );
 
-        // Deduct 1 seat in mock data
+        // Deduct 1 seat in live data
         setAvailableRows((prev) =>
           prev.map((r) =>
-            r.rowId === targetRow.rowId ? { ...r, availableSeats: r.availableSeats - 1 } : r
+            r.rowId === targetRow.rowId ? { ...r, availableSeats: Math.max(0, r.availableSeats - 1) } : r
           )
         );
 
@@ -211,11 +268,7 @@ export const PortalSimulator: React.FC<PortalSimulatorProps> = ({
                 isLab: true,
               },
             ]);
-            addLog(
-              'success',
-              `Auto-locked linked lab ${labCode} Sec ${labSec}!`,
-              labCode
-            );
+            addLog('success', `Auto-locked linked lab ${labCode} Sec ${labSec}!`, labCode);
           }
         }
 
@@ -252,7 +305,6 @@ export const PortalSimulator: React.FC<PortalSimulatorProps> = ({
         );
       }
 
-      // Schedule next polling tick
       timeoutId = setTimeout(executeBotStep, settings.pollingIntervalMs);
     };
 
@@ -318,7 +370,7 @@ export const PortalSimulator: React.FC<PortalSimulatorProps> = ({
     // Decrease seat
     setAvailableRows((prev) =>
       prev.map((r) =>
-        r.rowId === row.rowId ? { ...r, availableSeats: r.availableSeats - 1 } : r
+        r.rowId === row.rowId ? { ...r, availableSeats: Math.max(0, r.availableSeats - 1) } : r
       )
     );
 
@@ -360,46 +412,96 @@ export const PortalSimulator: React.FC<PortalSimulatorProps> = ({
 
   // Filtered rows
   const filteredAvailableRows = availableRows.filter((row) => {
-    if (!quickFilter.trim()) return true;
-    const q = quickFilter.toLowerCase();
-    return (
-      row.rawString.toLowerCase().includes(q) ||
-      row.courseCode.toLowerCase().includes(q) ||
-      row.faculty.toLowerCase().includes(q)
-    );
+    // Quick text filter
+    if (quickFilter.trim()) {
+      const q = quickFilter.toLowerCase();
+      const matchText =
+        row.rawString.toLowerCase().includes(q) ||
+        row.courseCode.toLowerCase().includes(q) ||
+        row.faculty.toLowerCase().includes(q) ||
+        row.room.toLowerCase().includes(q);
+      if (!matchText) return false;
+    }
+
+    // Department filter
+    if (departmentFilter !== 'ALL') {
+      const info = lookupCourseInfo(row.courseCode);
+      if (info.department !== departmentFilter) return false;
+    }
+
+    // Hide full
+    if (hideFullSections && row.availableSeats <= 0) {
+      return false;
+    }
+
+    return true;
   });
 
   return (
     <div className="space-y-4">
-      {/* Simulation Control Bar */}
+      {/* Simulation Control & Live Server Status Bar */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3 shadow-md">
-        <div className="flex items-center gap-2">
-          <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></div>
-          <span className="text-xs font-bold text-slate-200">
-            Live Interactive Portal Simulator (connect.bracu.ac.bd)
-          </span>
-          <span className="text-xs text-slate-500 hidden sm:inline">•</span>
-          <span className="text-xs text-slate-400 hidden sm:inline">
-            Matches official USIS Angular + AG-Grid advising portal
-          </span>
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            <span className="relative flex h-3 w-3">
+              <span
+                className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
+                  isLiveSyncActive ? 'bg-emerald-400' : 'bg-slate-500'
+                }`}
+              ></span>
+              <span
+                className={`relative inline-flex rounded-full h-3 w-3 ${
+                  isLiveSyncActive ? 'bg-emerald-500' : 'bg-slate-600'
+                }`}
+              ></span>
+            </span>
+            <span className="text-xs font-bold text-white">
+              Live SLMS Simulator &bull; connect.bracu.ac.bd
+            </span>
+          </div>
+
+          <div className="hidden sm:flex items-center gap-2 text-xs">
+            <span className="px-2 py-0.5 rounded bg-emerald-950/60 text-emerald-400 font-mono border border-emerald-800/40 text-[11px]">
+              Ping: {livePing}ms
+            </span>
+            <span className="text-slate-500 text-[11px] truncate max-w-xs">{lastLiveEvent}</span>
+          </div>
         </div>
 
-        {/* Test Scenario Buttons */}
+        {/* Live Controls */}
         <div className="flex flex-wrap items-center gap-2">
+          {/* Live Sync Toggle */}
+          <button
+            onClick={() => setIsLiveSyncActive(!isLiveSyncActive)}
+            className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold border transition-all flex items-center gap-1.5 ${
+              isLiveSyncActive
+                ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
+                : 'bg-slate-800 text-slate-400 border-slate-700'
+            }`}
+          >
+            <Radio className="w-3.5 h-3.5" />
+            <span>Live Sync: {isLiveSyncActive ? 'ON' : 'PAUSED'}</span>
+          </button>
+
+          {/* Test Fallback Scenario */}
           <button
             onClick={handleTestSimulateSeatFull}
             className="px-2.5 py-1.5 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-lg text-xs font-medium transition-all"
-            title="Sets CSE230 Choice 1 to 0 seats"
+            title="Sets CSE230 Choice 1 to 0 seats to trigger automatic fallback"
           >
-            Simulate 0 Seats on 1st Choice
+            Simulate 0 Seats (Test Fallback)
           </button>
+
+          {/* Open Seats */}
           <button
             onClick={handleTestSimulateSeatOpen}
-            className="px-2.5 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 rounded-lg text-xs font-medium transition-all"
-            title="Opens 3 seats on 2nd choice"
+            className="px-2.5 py-1.5 bg-blue-500/10 hover:bg-blue-500/20 text-blue-300 border border-blue-500/30 rounded-lg text-xs font-medium transition-all"
+            title="Opens seats in fallback section"
           >
-            Open Seats on Fallback Choice
+            Open Fallback Seats
           </button>
+
+          {/* Reset Demo */}
           <button
             onClick={() => {
               setAvailableRows(MOCK_AVAILABLE_PORTAL_ROWS);
@@ -418,7 +520,7 @@ export const PortalSimulator: React.FC<PortalSimulatorProps> = ({
             className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-medium border border-slate-700 transition-all flex items-center gap-1"
           >
             <RefreshCw className="w-3 h-3" />
-            <span>Reset Demo</span>
+            <span>Reset</span>
           </button>
         </div>
       </div>
@@ -448,6 +550,8 @@ export const PortalSimulator: React.FC<PortalSimulatorProps> = ({
             <div className="hidden md:flex items-center gap-1 text-xs text-gray-500">
               <span>Student</span>
               <span>/</span>
+              <span>Advising</span>
+              <span>/</span>
               <span className="font-semibold text-gray-800">
                 {settings.targetPhase === 'self-registration'
                   ? 'Self Registration'
@@ -459,12 +563,11 @@ export const PortalSimulator: React.FC<PortalSimulatorProps> = ({
           </div>
 
           <div className="flex items-center gap-3">
-            {/* Quick search button */}
             <div className="hidden sm:flex items-center gap-1 px-3 py-1 bg-gray-100 rounded-lg border border-gray-200 text-xs text-gray-500">
               <Search className="w-3.5 h-3.5" />
-              <span>Search</span>
+              <span>Typesense Live Search</span>
               <kbd className="text-[10px] bg-white px-1.5 py-0.5 rounded border border-gray-300 ml-2 font-mono">
-                Ctrl K
+                Live
               </kbd>
             </div>
             <button className="p-1.5 text-gray-500 hover:text-blue-600 transition-colors">
@@ -475,7 +578,7 @@ export const PortalSimulator: React.FC<PortalSimulatorProps> = ({
                 DP
               </div>
               <span className="text-xs font-semibold text-gray-700 hidden sm:inline">
-                Dipanjan Swapna Prangon
+                {INITIAL_STUDENT_INFO.name}
               </span>
             </div>
           </div>
@@ -483,43 +586,90 @@ export const PortalSimulator: React.FC<PortalSimulatorProps> = ({
 
         {/* Portal Main Advising Content */}
         <div className="p-4 sm:p-6 space-y-4">
-          {/* Advising Toolbar */}
-          <div className="bg-white p-4 rounded-xl border border-gray-200 flex flex-wrap items-center justify-between gap-3 shadow-sm">
-            <h1 className="text-base sm:text-lg font-bold text-gray-900 tracking-tight">
-              Advising for CSE (UNDERGRADUATE ) -{' '}
-              {settings.targetPhase === 'self-registration'
-                ? 'Self Registration'
-                : settings.targetPhase === 'phase-one'
-                ? 'Pre-Registration Phase One'
-                : 'Pre-Registration Phase Two'}
-            </h1>
+          {/* EXACT BRACU Connect Angular App-Toolbar matching user DOM */}
+          <div
+            id="kt_app_toolbar"
+            className="app-toolbar py-3 py-lg-6 bg-white p-4 rounded-xl border border-gray-200 shadow-sm"
+          >
+            <div
+              id="kt_app_toolbar_container"
+              className="app-container d-flex flex-stack container-xxl flex flex-wrap items-center justify-between gap-3 w-full"
+            >
+              <div className="page-title d-flex flex-wrap me-3 flex-column justify-content-center">
+                <h1 className="page-heading d-flex text-dark fw-bold fs-sm-3 my-0 flex-column justify-content-center text-base sm:text-lg font-bold text-gray-900 tracking-tight">
+                  Advising for CSE (UNDERGRADUATE ) -{' '}
+                  {settings.targetPhase === 'self-registration'
+                    ? 'Self Registration'
+                    : settings.targetPhase === 'phase-one'
+                    ? 'Phase One'
+                    : 'Phase Two'}
+                </h1>
+              </div>
 
-            <div className="flex items-center gap-2">
-              <button className="px-3 py-1.5 bg-sky-500 hover:bg-sky-600 text-white text-xs font-semibold rounded-lg flex items-center gap-1 shadow-sm transition-all">
-                <span>Actions</span>
-                <ChevronDown className="w-3.5 h-3.5" />
-              </button>
+              <div className="align-items-center d-flex flex items-center gap-2 relative">
+                {/* Actions Button */}
+                <div className="overflow-hidden ms-2 relative">
+                  <button
+                    type="button"
+                    onClick={() => setShowActionsDropdown(!showActionsDropdown)}
+                    className="mat-mdc-menu-trigger btn btn-primary btn-sm d-flex justify-content-center align-items-center px-3 py-2 bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold rounded-lg shadow-sm transition-all flex items-center gap-1"
+                    aria-haspopup="menu"
+                    aria-expanded={showActionsDropdown}
+                  >
+                    <span>Actions</span>
+                    <ChevronDown className="w-3.5 h-3.5" />
+                  </button>
 
-              <button
-                onClick={() => {
-                  setConfirmedAdvisingState(true);
-                  setShowConfirmModal(true);
-                }}
-                className={`px-4 py-1.5 text-xs font-bold rounded-lg shadow-sm transition-all flex items-center gap-1.5 ${
-                  confirmedAdvisingState
-                    ? 'bg-emerald-700 text-white'
-                    : 'bg-emerald-600 hover:bg-emerald-500 text-white'
-                }`}
-              >
-                <CheckCircle2 className="w-4 h-4" />
-                <span>Confirm Advising</span>
-              </button>
+                  {/* Actions Dropdown Menu */}
+                  {showActionsDropdown && (
+                    <div className="absolute right-0 top-full mt-1.5 w-48 bg-white border border-gray-200 rounded-xl shadow-xl py-1 z-40 text-xs">
+                      <button
+                        onClick={() => {
+                          window.print();
+                          setShowActionsDropdown(false);
+                        }}
+                        className="w-full text-left px-3 py-2 text-gray-700 hover:bg-gray-100 flex items-center gap-2"
+                      >
+                        <Printer className="w-3.5 h-3.5 text-gray-500" />
+                        <span>Print Advising Slip</span>
+                      </button>
+                      <button
+                        onClick={() => {
+                          setSelectedSections([]);
+                          setShowActionsDropdown(false);
+                          addLog('info', 'Cleared all selected draft sections.');
+                        }}
+                        className="w-full text-left px-3 py-2 text-red-600 hover:bg-red-50 flex items-center gap-2"
+                      >
+                        <MinusCircle className="w-3.5 h-3.5 text-red-500" />
+                        <span>Drop All Drafts</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Confirm Advising Green Button */}
+                <button
+                  onClick={() => {
+                    setConfirmedAdvisingState(true);
+                    setShowConfirmModal(true);
+                  }}
+                  className={`btn btn-success p-0 px-4 py-2 font-weight-bold ms-2 text-xs font-bold rounded-lg shadow-sm transition-all flex items-center gap-1.5 ${
+                    confirmedAdvisingState
+                      ? 'bg-emerald-700 text-white'
+                      : 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                  }`}
+                >
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>Confirm <span className="d-none d-md-inline">Advising</span></span>
+                </button>
+              </div>
             </div>
           </div>
 
           {/* Student Info Card & Warning Banner */}
           <div className="bg-white rounded-xl border border-gray-200 p-4 space-y-4 shadow-sm">
-            {/* Auto progress warning banner from screenshot */}
+            {/* Auto progress warning banner */}
             <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 flex items-start gap-3">
               <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
               <p className="text-xs font-medium text-amber-900 leading-relaxed">
@@ -579,42 +729,76 @@ export const PortalSimulator: React.FC<PortalSimulatorProps> = ({
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
             {/* Left 7 Columns: Available Courses AG-Grid */}
             <div className="lg:col-span-7 bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm flex flex-col">
-              {/* Card Header & Quick filter */}
-              <div className="p-3 bg-gray-50 border-b border-gray-200 flex flex-wrap items-center justify-between gap-2">
-                <h2 className="font-bold text-xs sm:text-sm text-gray-800">Available Courses</h2>
-
-                <div className="flex items-center gap-1.5 w-full sm:w-auto">
-                  <div className="relative w-full sm:w-56">
-                    <input
-                      type="text"
-                      placeholder="Quick filter..."
-                      value={quickFilter}
-                      onChange={(e) => setQuickFilter(e.target.value)}
-                      className="w-full bg-white border border-gray-300 rounded-lg pl-3 pr-8 py-1.5 text-xs text-gray-800 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
-                    />
-                    {quickFilter && (
-                      <button
-                        onClick={() => setQuickFilter('')}
-                        className="absolute right-2 top-2 text-gray-400 hover:text-gray-600 text-xs"
-                      >
-                        ✕
-                      </button>
-                    )}
+              {/* Card Header & Live Filters */}
+              <div className="p-3 bg-gray-50 border-b border-gray-200 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <h2 className="font-bold text-xs sm:text-sm text-gray-800">Available Courses</h2>
+                    <span className="px-2 py-0.5 rounded bg-blue-100 text-blue-800 text-[10px] font-semibold">
+                      {filteredAvailableRows.length} Sections Found
+                    </span>
                   </div>
-                  <span className="text-[11px] text-gray-400">
-                    {filteredAvailableRows.length} rows
-                  </span>
+
+                  <div className="flex items-center gap-1.5 w-full sm:w-auto">
+                    <div className="relative w-full sm:w-56">
+                      <input
+                        type="text"
+                        placeholder="Filter by course, faculty..."
+                        value={quickFilter}
+                        onChange={(e) => setQuickFilter(e.target.value)}
+                        className="w-full bg-white border border-gray-300 rounded-lg pl-3 pr-8 py-1.5 text-xs text-gray-800 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                      />
+                      {quickFilter && (
+                        <button
+                          onClick={() => setQuickFilter('')}
+                          className="absolute right-2 top-2 text-gray-400 hover:text-gray-600 text-xs"
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Sub-Filter Row: Departments and Seat Availability */}
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs pt-1 border-t border-gray-200/70">
+                  <div className="flex items-center gap-1">
+                    <span className="text-[11px] text-gray-500 font-medium mr-1">Dept:</span>
+                    {['ALL', 'CSE', 'MNS', 'ENH', 'BBS'].map((dept) => (
+                      <button
+                        key={dept}
+                        onClick={() => setDepartmentFilter(dept)}
+                        className={`px-2 py-0.5 rounded text-[11px] font-semibold transition-all ${
+                          departmentFilter === dept
+                            ? 'bg-blue-600 text-white'
+                            : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-100'
+                        }`}
+                      >
+                        {dept}
+                      </button>
+                    ))}
+                  </div>
+
+                  <label className="flex items-center gap-1.5 text-[11px] text-gray-600 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={hideFullSections}
+                      onChange={(e) => setHideFullSections(e.target.checked)}
+                      className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                    />
+                    <span>Hide 0 Seat Sections</span>
+                  </label>
                 </div>
               </div>
 
-              {/* AG-Grid Mock Table */}
-              <div className="overflow-x-auto max-h-[380px] overflow-y-auto">
+              {/* AG-Grid Live Table */}
+              <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
                 <table className="w-full text-left text-xs border-collapse">
-                  <thead className="bg-[#f0f3f6] text-gray-600 font-semibold text-[11px] uppercase tracking-wider sticky top-0 border-b border-gray-300">
+                  <thead className="bg-[#f0f3f6] text-gray-600 font-semibold text-[11px] uppercase tracking-wider sticky top-0 border-b border-gray-300 z-10">
                     <tr>
-                      <th className="py-2.5 px-3">COURSE NAME</th>
+                      <th className="py-2.5 px-3">COURSE &amp; SECTION</th>
+                      <th className="py-2.5 px-3">SCHEDULE &amp; ROOM</th>
                       <th className="py-2.5 px-3">PRE REQUISITE</th>
-                      <th className="py-2.5 px-3">COURSE EQUIVALENCES</th>
                       <th className="py-2.5 px-3 text-right">ACTION</th>
                     </tr>
                   </thead>
@@ -641,9 +825,12 @@ export const PortalSimulator: React.FC<PortalSimulatorProps> = ({
                               </span>
                             )}
                           </td>
-                          <td className="py-2.5 px-3 text-gray-600 font-sans">{row.prerequisite}</td>
-                          <td className="py-2.5 px-3 text-gray-600 font-sans">
-                            {row.courseEquivalences}
+                          <td className="py-2.5 px-3 text-gray-600 font-sans text-[11px] whitespace-nowrap">
+                            <span>{row.scheduleDays.join('/')} {row.scheduleTime}</span>
+                            <span className="block text-[10px] text-gray-400 font-mono">{row.room}</span>
+                          </td>
+                          <td className="py-2.5 px-3 text-gray-600 font-sans text-[11px]">
+                            {row.prerequisite}
                           </td>
                           <td className="py-2.5 px-3 text-right whitespace-nowrap">
                             <div className="flex items-center justify-end gap-1.5">
@@ -673,6 +860,13 @@ export const PortalSimulator: React.FC<PortalSimulatorProps> = ({
                         </tr>
                       );
                     })}
+                    {filteredAvailableRows.length === 0 && (
+                      <tr>
+                        <td colSpan={4} className="py-8 text-center text-gray-400 font-sans text-xs">
+                          No sections match current filter criteria.
+                        </td>
+                      </tr>
+                    )}
                   </tbody>
                 </table>
               </div>
@@ -687,9 +881,9 @@ export const PortalSimulator: React.FC<PortalSimulatorProps> = ({
                 </span>
               </div>
 
-              <div className="overflow-x-auto max-h-[380px] overflow-y-auto">
+              <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
                 <table className="w-full text-left text-xs border-collapse">
-                  <thead className="bg-[#f0f3f6] text-gray-600 font-semibold text-[11px] uppercase tracking-wider sticky top-0 border-b border-gray-300">
+                  <thead className="bg-[#f0f3f6] text-gray-600 font-semibold text-[11px] uppercase tracking-wider sticky top-0 border-b border-gray-300 z-10">
                     <tr>
                       <th className="py-2.5 px-3">COURSE NAME</th>
                       <th className="py-2.5 px-3 text-right">ACTION</th>
@@ -705,6 +899,9 @@ export const PortalSimulator: React.FC<PortalSimulatorProps> = ({
                               LAB
                             </span>
                           )}
+                          <div className="text-[10px] text-gray-500 font-sans font-normal mt-0.5">
+                            {sec.scheduleDays.join('/')} {sec.scheduleTime} &bull; {sec.room}
+                          </div>
                         </td>
                         <td className="py-2.5 px-3 text-right whitespace-nowrap">
                           <div className="flex items-center justify-end gap-1.5">
@@ -729,84 +926,6 @@ export const PortalSimulator: React.FC<PortalSimulatorProps> = ({
                   </tbody>
                 </table>
               </div>
-            </div>
-          </div>
-
-          {/* Schedule Visualization Table from User Screenshots */}
-          <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm space-y-3">
-            <div className="flex items-center justify-between">
-              <h2 className="font-bold text-sm text-gray-900 flex items-center gap-2">
-                <span>Class Schedule</span>
-                <span className="text-xs font-normal text-gray-500">
-                  (Weekly Routine Matrix &amp; Slot Verification)
-                </span>
-              </h2>
-              <button
-                onClick={() => window.print()}
-                className="p-1.5 text-gray-600 hover:text-blue-600 rounded-lg hover:bg-gray-100 transition-colors"
-                title="Print Schedule"
-              >
-                <Printer className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="overflow-x-auto border border-gray-200 rounded-lg">
-              <table className="w-full text-center text-xs border-collapse divide-y divide-gray-200">
-                <thead className="bg-gray-100 text-gray-700 font-bold text-[11px] uppercase">
-                  <tr>
-                    <th className="py-2.5 px-2 border-r border-gray-200 w-36">Time / Day</th>
-                    {['SUNDAY', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY'].map(
-                      (day) => (
-                        <th key={day} className="py-2.5 px-2 border-r border-gray-200 min-w-[120px]">
-                          {day}
-                        </th>
-                      )
-                    )}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-200 font-medium text-[11px]">
-                  {[
-                    '8:00 AM - 9:20 AM',
-                    '9:30 AM - 10:50 AM',
-                    '11:00 AM - 12:20 PM',
-                    '2:00 PM - 3:20 PM',
-                    '2:00 PM - 4:50 PM',
-                    '3:30 PM - 4:50 PM',
-                  ].map((slot) => (
-                    <tr key={slot} className="hover:bg-blue-50/20">
-                      <td className="py-2 px-2 border-r border-gray-200 font-bold text-gray-700 bg-gray-50">
-                        {slot}
-                      </td>
-                      {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d) => {
-                        // Find matching selected sections in this slot and day
-                        const matches = selectedSections.filter(
-                          (s) => s.scheduleTime === slot && s.scheduleDays.includes(d)
-                        );
-
-                        return (
-                          <td key={d} className="py-2 px-1 border-r border-gray-200 align-top">
-                            {matches.map((m) => (
-                              <div
-                                key={m.rowId}
-                                className={`text-[10px] p-1.5 rounded mb-1 font-semibold leading-tight shadow-xs ${
-                                  m.isLab
-                                    ? 'bg-indigo-100 text-indigo-900 border border-indigo-200'
-                                    : 'bg-blue-100 text-blue-900 border border-blue-200'
-                                }`}
-                              >
-                                {m.courseCode} -{m.sectionNumber} -{m.faculty}
-                                <span className="block text-[9px] text-gray-500 font-normal">
-                                  {m.room}
-                                </span>
-                              </div>
-                            ))}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
             </div>
           </div>
         </div>
@@ -892,7 +1011,7 @@ export const PortalSimulator: React.FC<PortalSimulatorProps> = ({
                 <button
                   onClick={onOpenDownloadModal}
                   className="px-3 py-2 bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-300 border border-indigo-500/40 rounded-xl font-semibold transition-all"
-                  title="Export to Real Browser"
+                  title="Export to Real Browser Extension"
                 >
                   <ExternalLink className="w-3.5 h-3.5" />
                 </button>
@@ -957,7 +1076,7 @@ export const PortalSimulator: React.FC<PortalSimulatorProps> = ({
         </div>
       </div>
 
-      {/* Course Details Modal (from user's Webpack Angular inspection) */}
+      {/* Course Details Modal */}
       {activeCourseDetailsModal && (
         <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-lg w-full overflow-hidden shadow-2xl border border-gray-200">
