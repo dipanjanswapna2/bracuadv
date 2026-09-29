@@ -1,0 +1,6 @@
+{
+  "name": "BRACU Connect Auto Advising Bot & Extension Suite",
+  "description": "Automated course selection, seat monitor, slot locking, and fallback priority engine for BRAC University advising portal with Chrome extension generator and interactive simulator.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
